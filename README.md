@@ -5,7 +5,7 @@
 - **Publish** a package locally by creating a tarball with `pnpm pack` and storing it in a cache directory.
 - **Add** a locally published package to another project's dependencies by updating its `package.json` with the cached local file reference.
 
-This tool is useful for testing package changes locally without publishing to a remote registry.
+This tool is useful for testing package changes locally without publishing to a remote registry. It's most useful within monorepos managed by pnpm workspaces that use local package versions like `catalog:` and `workspace:*`.
 
 ## Features
 
