@@ -1,0 +1,25 @@
+{
+  "name": "packlink",
+  "type": "module",
+  "version": "0.0.0",
+  "description": "A simple and reliable way to link and develop a package locally.",
+  "author": "Travis Arnold (http://souporserious.com)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/souporserious/packlink.git"
+  },
+  "bugs": "https://github.com/souporserious/packlink/issues",
+  "funding": "https://github.com/sponsors/souporserious",
+  "main": "dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc && chmod +x dist/index.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.1",
+    "typescript": "^5.7.3"
+  }
+}
