@@ -11,7 +11,7 @@
   },
   "bugs": "https://github.com/souporserious/packlink/issues",
   "funding": "https://github.com/sponsors/souporserious",
-  "main": "dist/index.js",
+  "bin": "dist/index.js",
   "files": [
     "dist"
   ],
