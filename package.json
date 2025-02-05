@@ -1,7 +1,7 @@
 {
   "name": "packlink",
   "type": "module",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "A simple and reliable way to link and develop a package locally.",
   "author": "Travis Arnold (http://souporserious.com)",
   "license": "MIT",
