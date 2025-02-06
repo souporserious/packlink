@@ -1,28 +1,14 @@
 #!/usr/bin/env node
 
-import {
-  readFileSync,
-  writeFileSync,
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  renameSync,
-  rmSync,
-} from 'node:fs'
-import { resolve, relative } from 'node:path'
-import { homedir } from 'node:os'
+import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
+import { relative, resolve } from 'node:path'
 import { execSync } from 'node:child_process'
+import { homedir } from 'node:os'
 
 interface PackageJson {
   name: string
   version: string
   dependencies?: Record<string, string>
-}
-
-interface TarballMetadata {
-  file: string
-  packageVersion: string
-  timestamp: number
 }
 
 const homeDirectory = homedir()
@@ -90,31 +76,17 @@ function publish(): void {
     process.exit(1)
   }
 
-  const originalTarballName = `${safePackageName}-${packageVersion}.tgz`
-  const originalTarballPath = resolve(cacheDirectory, originalTarballName)
+  // The tarball is generated with the name `<safePackageName>-<packageVersion>.tgz`
+  const tarballName = `${safePackageName}-${packageVersion}.tgz`
+  const tarballPath = resolve(cacheDirectory, tarballName)
 
-  if (!existsSync(originalTarballPath)) {
-    console.error('Tarball not found at destination:', originalTarballName)
+  if (!existsSync(tarballPath)) {
+    console.error('Tarball not found at destination:', tarballName)
     process.exit(1)
   }
 
-  // Remove any existing tarballs with the same name and version.
-  const existingTarballs = readdirSync(cacheDirectory).filter((file) =>
-    file.startsWith(`${safePackageName}-${packageVersion}-`)
-  )
-  for (const file of existingTarballs) {
-    rmSync(resolve(cacheDirectory, file))
-  }
-
-  // Append a timestamp so that pnpm will install the updated version.
-  const timestamp = Date.now()
-  const newTarballName = `${safePackageName}-${packageVersion}-${timestamp}.tgz`
-  const newTarballPath = resolve(cacheDirectory, newTarballName)
-
-  renameSync(originalTarballPath, newTarballPath)
-
   console.log(
-    `Published ${packageName}@${packageVersion} to ${newTarballPath}.\nYou can now run 'packlink add ${packageName}' in another project to add this tarball as a dependency.`
+    `Published ${packageName}@${packageVersion} to ${tarballPath}.\nYou can now run 'packlink add ${packageName}' in another project to add this tarball as a dependency.`
   )
 }
 
@@ -138,37 +110,16 @@ function add(packageName: string): void {
     process.exit(1)
   }
 
-  const tarballs = files
+  const versions = files
     .map((file) => {
-      const inner = file.substring(safePackageName.length + 1, file.length - 4) // yields "<packageVersion>-<timestamp>"
-      const lastHyphenIndex = inner.lastIndexOf('-')
-
-      if (lastHyphenIndex === -1) {
-        // If there is no hyphen, the file does not have a timestamp; skip it.
-        return null
-      }
-
-      return {
-        file,
-        packageVersion: inner.substring(0, lastHyphenIndex),
-        timestamp: parseInt(inner.substring(lastHyphenIndex + 1), 10),
-      }
+      // Remove the safeName and hyphen, and the .tgz suffix
+      // e.g. "<package-name>-1.0.0.tgz" becomes "1.0.0"
+      return file.substring(safePackageName.length + 1, file.length - 4)
     })
-    .filter(Boolean) as TarballMetadata[]
-
-  if (tarballs.length === 0) {
-    console.error(
-      `No published tarball with timestamp found for package ${packageName}.`
-    )
-    process.exit(1)
-  }
-
-  tarballs.sort((a, b) => {
-    return compareSemanticVersions(a.packageVersion, b.packageVersion)
-  })
-
-  const latest = tarballs[tarballs.length - 1]
-  const tarballPath = resolve(cacheDirectory, latest.file)
+    .sort(compareSemanticVersions)
+  const latestVersion = versions[versions.length - 1]
+  const tarballName = `${safePackageName}-${latestVersion}.tgz`
+  const tarballPath = resolve(cacheDirectory, tarballName)
 
   if (!existsSync(tarballPath)) {
     console.error(`Tarball not found at ${tarballPath}`)
@@ -191,26 +142,18 @@ function add(packageName: string): void {
     process.exit(1)
   }
 
-  // Remove old version of the package from dependencies otherwise pnpm will error since we delete old versions when publishing
-  const hasDependency = consumerPackageJson.dependencies?.[packageName]
-  if (hasDependency) {
-    delete consumerPackageJson.dependencies![packageName]
-    writeFileSync(
-      consumerPackagePath,
-      JSON.stringify(consumerPackageJson, null, 2)
-    )
-  }
-
   try {
-    execSync(`pnpm add ${dependencyPath}`)
+    // Use --force so that pnpm installs the local tarball even if it’s already present.
+    execSync(`pnpm add ${dependencyPath} --force`)
   } catch (error) {
-    console.error(`Error running "pnpm add ${dependencyPath}":`, error)
+    console.error(`Error running "pnpm add ${dependencyPath} --force":`, error)
     process.exit(1)
   }
 
+  const hasDependency = consumerPackageJson.dependencies?.[packageName]
   const action = hasDependency ? 'Updated' : 'Added'
   console.log(
-    `${action} ${packageName}@${latest.packageVersion} dependency in package.json`
+    `${action} ${packageName}@${latestVersion} dependency in package.json`
   )
 }
 
