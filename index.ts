@@ -68,8 +68,8 @@ function publish(): void {
     packageJson = JSON.parse(
       readFileSync(resolve(process.cwd(), 'package.json'), 'utf8')
     )
-  } catch (err) {
-    console.error('Error reading package.json:', err)
+  } catch (error) {
+    console.error('Error reading package.json:', error)
     process.exit(1)
   }
 
@@ -85,8 +85,8 @@ function publish(): void {
 
   try {
     execSync(`pnpm pack --pack-destination ${cacheDirectory}`)
-  } catch (err) {
-    console.error('Error running pnpm pack:', err)
+  } catch (error) {
+    console.error('Error running "pnpm pack":', error)
     process.exit(1)
   }
 
@@ -186,21 +186,31 @@ function add(packageName: string): void {
   let consumerPackageJson: PackageJson
   try {
     consumerPackageJson = JSON.parse(readFileSync(consumerPackagePath, 'utf8'))
-  } catch (err) {
-    console.error('Error reading consumer package.json:', err)
+  } catch (error) {
+    console.error('Error reading consumer package.json:', error)
     process.exit(1)
   }
 
-  consumerPackageJson.dependencies = consumerPackageJson.dependencies || {}
-  consumerPackageJson.dependencies[packageName] = dependencyPath
+  // Remove old version of the package from dependencies otherwise pnpm will error since we delete old versions when publishing
+  const hasDependency = consumerPackageJson.dependencies?.[packageName]
+  if (hasDependency) {
+    delete consumerPackageJson.dependencies![packageName]
+    writeFileSync(
+      consumerPackagePath,
+      JSON.stringify(consumerPackageJson, null, 2)
+    )
+  }
 
-  writeFileSync(
-    consumerPackagePath,
-    JSON.stringify(consumerPackageJson, null, 2)
-  )
+  try {
+    execSync(`pnpm add ${dependencyPath}`)
+  } catch (error) {
+    console.error(`Error running "pnpm add ${dependencyPath}":`, error)
+    process.exit(1)
+  }
 
+  const action = hasDependency ? 'Updated' : 'Added'
   console.log(
-    `Added ${packageName}@${latest.packageVersion} to dependencies. Run 'pnpm install' to install the dependency.`
+    `${action} ${packageName}@${latest.packageVersion} dependency in package.json`
   )
 }
 
