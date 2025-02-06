@@ -6,6 +6,8 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
+  renameSync,
+  rmSync,
 } from 'node:fs'
 import { resolve, relative } from 'node:path'
 import { homedir } from 'node:os'
@@ -17,6 +19,12 @@ interface PackageJson {
   dependencies?: Record<string, string>
 }
 
+interface TarballMetadata {
+  file: string
+  packageVersion: string
+  timestamp: number
+}
+
 const homeDirectory = homedir()
 const cacheDirectory: string = resolve(homeDirectory, '.config', 'packlink')
 
@@ -26,9 +34,9 @@ if (!existsSync(cacheDirectory)) {
 
 /**
  * Converts a package name to a safe string.
- * For example, a scoped package "@scope/pkg" becomes "scope-pkg".
+ * For example, a scoped package "@scope/package" becomes "scope-package".
  */
-function getSafeName(packageName: string): string {
+function getSafePackageName(packageName: string): string {
   if (packageName.startsWith('@')) {
     return packageName.slice(1).replace(/\//g, '-')
   }
@@ -65,14 +73,15 @@ function publish(): void {
     process.exit(1)
   }
 
-  const pkgName = packageJson.name
-  const pkgVersion = packageJson.version
-  if (!pkgName || !pkgVersion) {
+  const packageName = packageJson.name
+  const packageVersion = packageJson.version
+
+  if (!packageName || !packageVersion) {
     console.error("package.json must have both a 'name' and a 'version'")
     process.exit(1)
   }
 
-  const safeName = getSafeName(pkgName)
+  const safePackageName = getSafePackageName(packageName)
 
   try {
     execSync(`pnpm pack --pack-destination ${cacheDirectory}`)
@@ -81,16 +90,31 @@ function publish(): void {
     process.exit(1)
   }
 
-  const tarballName = `${safeName}-${pkgVersion}.tgz`
-  const tarballPath = resolve(cacheDirectory, tarballName)
+  const originalTarballName = `${safePackageName}-${packageVersion}.tgz`
+  const originalTarballPath = resolve(cacheDirectory, originalTarballName)
 
-  if (!existsSync(tarballPath)) {
-    console.error('Tarball not found at destination:', tarballName)
+  if (!existsSync(originalTarballPath)) {
+    console.error('Tarball not found at destination:', originalTarballName)
     process.exit(1)
   }
 
+  // Remove any existing tarballs with the same name and version.
+  const existingTarballs = readdirSync(cacheDirectory).filter((file) =>
+    file.startsWith(`${safePackageName}-${packageVersion}-`)
+  )
+  for (const file of existingTarballs) {
+    rmSync(resolve(cacheDirectory, file))
+  }
+
+  // Append a timestamp so that pnpm will install the updated version.
+  const timestamp = Date.now()
+  const newTarballName = `${safePackageName}-${packageVersion}-${timestamp}.tgz`
+  const newTarballPath = resolve(cacheDirectory, newTarballName)
+
+  renameSync(originalTarballPath, newTarballPath)
+
   console.log(
-    `Published ${pkgName}@${pkgVersion} to ${tarballPath}.\nYou can now run 'npx packlink add ${pkgName}' in another project to add this tarball as a dependency.`
+    `Published ${packageName}@${packageVersion} to ${newTarballPath}.\nYou can now run 'packlink add ${packageName}' in another project to add this tarball as a dependency.`
   )
 }
 
@@ -104,25 +128,47 @@ function add(packageName: string): void {
     process.exit(1)
   }
 
-  const safeName = getSafeName(packageName)
+  const safePackageName = getSafePackageName(packageName)
   const files = readdirSync(cacheDirectory).filter(
-    (file) => file.startsWith(`${safeName}-`) && file.endsWith('.tgz')
+    (file) => file.startsWith(`${safePackageName}-`) && file.endsWith('.tgz')
   )
+
   if (files.length === 0) {
     console.error(`No published tarball found for package ${packageName}.`)
     process.exit(1)
   }
 
-  const versions = files
+  const tarballs = files
     .map((file) => {
-      // Remove the safeName and hyphen, and the .tgz suffix
-      // e.g. "<package-name>-1.0.0.tgz" becomes "1.0.0"
-      return file.substring(safeName.length + 1, file.length - 4)
+      const inner = file.substring(safePackageName.length + 1, file.length - 4) // yields "<packageVersion>-<timestamp>"
+      const lastHyphenIndex = inner.lastIndexOf('-')
+
+      if (lastHyphenIndex === -1) {
+        // If there is no hyphen, the file does not have a timestamp; skip it.
+        return null
+      }
+
+      return {
+        file,
+        packageVersion: inner.substring(0, lastHyphenIndex),
+        timestamp: parseInt(inner.substring(lastHyphenIndex + 1), 10),
+      }
     })
-    .sort(compareSemanticVersions)
-  const latestVersion = versions[versions.length - 1]
-  const tarballName = `${safeName}-${latestVersion}.tgz`
-  const tarballPath = resolve(cacheDirectory, tarballName)
+    .filter(Boolean) as TarballMetadata[]
+
+  if (tarballs.length === 0) {
+    console.error(
+      `No published tarball with timestamp found for package ${packageName}.`
+    )
+    process.exit(1)
+  }
+
+  tarballs.sort((a, b) => {
+    return compareSemanticVersions(a.packageVersion, b.packageVersion)
+  })
+
+  const latest = tarballs[tarballs.length - 1]
+  const tarballPath = resolve(cacheDirectory, latest.file)
 
   if (!existsSync(tarballPath)) {
     console.error(`Tarball not found at ${tarballPath}`)
@@ -136,22 +182,25 @@ function add(packageName: string): void {
     dependencyPath = `file:~${tarballPath.slice(homeDirectory.length)}`
   }
 
-  const consumerPkgPath = resolve(process.cwd(), 'package.json')
-  let consumerPkg: PackageJson
+  const consumerPackagePath = resolve(process.cwd(), 'package.json')
+  let consumerPackageJson: PackageJson
   try {
-    consumerPkg = JSON.parse(readFileSync(consumerPkgPath, 'utf8'))
+    consumerPackageJson = JSON.parse(readFileSync(consumerPackagePath, 'utf8'))
   } catch (err) {
     console.error('Error reading consumer package.json:', err)
     process.exit(1)
   }
 
-  consumerPkg.dependencies = consumerPkg.dependencies || {}
-  consumerPkg.dependencies[packageName] = dependencyPath
+  consumerPackageJson.dependencies = consumerPackageJson.dependencies || {}
+  consumerPackageJson.dependencies[packageName] = dependencyPath
 
-  writeFileSync(consumerPkgPath, JSON.stringify(consumerPkg, null, 2))
+  writeFileSync(
+    consumerPackagePath,
+    JSON.stringify(consumerPackageJson, null, 2)
+  )
 
   console.log(
-    `Added ${packageName}@${latestVersion} to dependencies. Run 'pnpm install' to install the dependency.`
+    `Added ${packageName}@${latest.packageVersion} to dependencies. Run 'pnpm install' to install the dependency.`
   )
 }
 

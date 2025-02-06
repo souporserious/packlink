@@ -9,7 +9,7 @@ This tool is useful for testing package changes locally without publishing to a 
 
 ## Features
 
-- **Local Publishing:** Creates a tarball of your package using `pnpm pack` and stores it under `~/.config/packlink/<package-name>-<version>.tgz`.
+- **Local Publishing:** Creates a tarball of your package using `pnpm pack` and stores it under `~/.config/packlink/<package-name>-<version>-<timestamp>.tgz`.
 - **Local Dependency Linking:** Updates the consumer project's `package.json` to reference the local tarball.
 - **Simple and Minimal:** Focuses on basic local publishing functionality without added complexity.
 
