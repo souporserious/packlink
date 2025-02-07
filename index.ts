@@ -8,6 +8,7 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  watch,
 } from 'node:fs'
 import { resolve, relative } from 'node:path'
 import { homedir } from 'node:os'
@@ -61,7 +62,7 @@ function compareSemanticVersions(a: string, b: string): number {
 }
 
 /** Create a tarball of the current package and store it in the cache directory. */
-function publish(): void {
+function publish(includeAddMessage: boolean = true): void {
   let packageJson: PackageJson
 
   try {
@@ -113,9 +114,37 @@ function publish(): void {
 
   renameSync(originalTarballPath, newTarballPath)
 
-  console.log(
-    `Published ${packageName}@${packageVersion} to ${newTarballPath}.\nYou can now run 'packlink add ${packageName}' in another project to add this tarball as a dependency.`
-  )
+  console.log(`Published ${packageName}@${packageVersion}`)
+
+  if (includeAddMessage) {
+    console.log(
+      `You can now run 'packlink add ${packageName}' in another project to add this package as a dependency.`
+    )
+  }
+}
+
+/** Watches the specified build directory for changes. */
+function watchPublish(buildDirectory: string): void {
+  const directoryToWatch = resolve(process.cwd(), buildDirectory)
+  publish()
+  console.log(`Watching "${buildDirectory}" directory for changes...`)
+
+  let debounceTimeout: NodeJS.Timeout
+  try {
+    watch(directoryToWatch, { recursive: true }, () => {
+      // Debounce to prevent multiple rapid executions
+      if (debounceTimeout) {
+        clearTimeout(debounceTimeout)
+      }
+      debounceTimeout = setTimeout(() => {
+        console.log(`Change detected, republishing...`)
+        publish(false)
+      }, 200)
+    })
+  } catch (error) {
+    console.error(`Error watching directory ${directoryToWatch}:`, error)
+    process.exit(1)
+  }
 }
 
 /**
@@ -214,23 +243,81 @@ function add(packageName: string): void {
   )
 }
 
+/** Watches the cache directory for changes to the tarball of the specified package. */
+function watchAdd(packageName: string): void {
+  const safePackageName = getSafePackageName(packageName)
+  add(packageName)
+  console.log(`Watching for changes...`)
+
+  let debounceTimeout: NodeJS.Timeout
+  try {
+    watch(cacheDirectory, { recursive: false }, (_eventType, filename) => {
+      if (
+        filename &&
+        filename.startsWith(`${safePackageName}-`) &&
+        filename.endsWith('.tgz')
+      ) {
+        if (debounceTimeout) {
+          clearTimeout(debounceTimeout)
+        }
+        debounceTimeout = setTimeout(() => {
+          console.log(
+            `Detected update for ${packageName} tarball. Updating dependency...`
+          )
+          add(packageName)
+        }, 200)
+      }
+    })
+  } catch (error) {
+    console.error(`Error watching cache directory:`, error)
+    process.exit(1)
+  }
+}
+
 const args: string[] = process.argv.slice(2)
 const command = args[0]
 
 switch (command) {
-  case 'publish':
-    publish()
+  case 'publish': {
+    const watchArg = args.find((arg) => arg.startsWith('--watch'))
+    if (watchArg) {
+      let watchDirectory = 'dist'
+      if (watchArg.includes('=')) {
+        watchDirectory = watchArg.split('=')[1]
+      }
+      watchPublish(watchDirectory)
+    } else {
+      publish()
+    }
     break
-  case 'add':
-    add(args[1])
+  }
+  case 'add': {
+    const packageName = args[1]
+    if (!packageName) {
+      console.error('Usage: packlink add <package-name>')
+      process.exit(1)
+    }
+    const watchArg = args.find((arg) => arg.startsWith('--watch'))
+    if (watchArg) {
+      watchAdd(packageName)
+    } else {
+      add(packageName)
+    }
     break
+  }
   default:
     console.log('Usage:')
     console.log(
-      '  packlink publish               # Create and cache a tarball of the current package'
+      '  packlink publish                      # Create and cache a tarball of the current package'
     )
     console.log(
-      '  packlink add <package-name>    # Add the local tarball as a dependency in package.json'
+      '  packlink publish --watch              # Watch the "dist" directory for changes (or override with --watch=<directory>)'
+    )
+    console.log(
+      '  packlink add <package-name>           # Add the local tarball as a dependency in package.json'
+    )
+    console.log(
+      '  packlink add <package-name> --watch   # Watch the cache for changes to the package tarball and update the dependency'
     )
     process.exit(0)
 }
