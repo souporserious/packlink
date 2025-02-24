@@ -231,6 +231,7 @@ function add(packageName: string): void {
   }
 
   try {
+    console.log(`Adding dependency...`)
     execSync(`pnpm add ${dependencyPath}`)
   } catch (error) {
     console.error(`Error running "pnpm add ${dependencyPath}":`, error)
@@ -261,9 +262,6 @@ function watchAdd(packageName: string): void {
           clearTimeout(debounceTimeout)
         }
         debounceTimeout = setTimeout(() => {
-          console.log(
-            `Detected update for ${packageName} tarball. Updating dependency...`
-          )
           add(packageName)
         }, 200)
       }
