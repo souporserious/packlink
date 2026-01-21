@@ -2,6 +2,7 @@
 
 import {
   readFileSync,
+  writeFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -289,8 +290,13 @@ function add(packageName: string): void {
     process.exit(1)
   }
 
-  // Use relative path for all platforms to ensure consistent behavior
-  const dependencyPath = `file:${relative(process.cwd(), tarballPath)}`
+  // Use ~ on unix-like systems to keep the path simple.
+  let dependencyPath: string
+  if (process.platform === 'win32') {
+    dependencyPath = `file:${relative(process.cwd(), tarballPath)}`
+  } else {
+    dependencyPath = `file:~${tarballPath.slice(homeDirectory.length)}`
+  }
 
   const consumerPackagePath = resolve(process.cwd(), 'package.json')
   let consumerPackageJson: PackageJson
@@ -302,6 +308,13 @@ function add(packageName: string): void {
   }
 
   const hasDependency = consumerPackageJson.dependencies?.[packageName]
+  if (hasDependency) {
+    delete consumerPackageJson.dependencies![packageName]
+    writeFileSync(
+      consumerPackagePath,
+      JSON.stringify(consumerPackageJson, null, 2)
+    )
+  }
   const action = hasDependency ? 'Updated' : 'Added'
 
   try {
