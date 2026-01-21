@@ -2,7 +2,6 @@
 
 import {
   readFileSync,
-  writeFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -14,6 +13,103 @@ import { resolve, relative } from 'node:path'
 import { homedir } from 'node:os'
 import { execSync } from 'node:child_process'
 
+const color = {
+  reset: '\x1b[0m',
+  red: '\x1b[31m',
+  green: '\x1b[32m',
+  yellow: '\x1b[33m',
+  cyan: '\x1b[36m',
+  dim: '\x1b[2m',
+}
+
+interface SemVer {
+  major: number
+  minor: number
+  patch: number
+  prerelease: (string | number)[]
+}
+
+function createSemVer(
+  major: number,
+  minor: number,
+  patch: number,
+  prerelease: (string | number)[] = []
+): SemVer {
+  return { major, minor, patch, prerelease }
+}
+
+function parsePrerelease(input: string | undefined): (string | number)[] {
+  if (!input) return []
+  return input
+    .split('.')
+    .filter((segment) => segment.length > 0)
+    .map((segment) => {
+      const numeric = Number(segment)
+      return Number.isNaN(numeric) ? segment : numeric
+    })
+}
+
+function normalizeVersionParts(
+  major: string | undefined,
+  minor: string | undefined,
+  patch: string | undefined
+): [number, number, number] {
+  return [Number(major ?? 0), Number(minor ?? 0), Number(patch ?? 0)]
+}
+
+function parseSemVer(input: string): SemVer | null {
+  const trimmed = input.trim()
+  const match = trimmed.match(
+    /^v?(?<major>\d+)(?:\.(?<minor>\d+))?(?:\.(?<patch>\d+))?(?:-(?<prerelease>[0-9A-Za-z-.]+))?$/
+  )
+
+  if (!match || !match.groups?.['major']) return null
+
+  const [major, minor, patch] = normalizeVersionParts(
+    match.groups['major'],
+    match.groups['minor'],
+    match.groups['patch']
+  )
+
+  return createSemVer(
+    major,
+    minor,
+    patch,
+    parsePrerelease(match.groups['prerelease'])
+  )
+}
+
+function compareSemVer(a: SemVer, b: SemVer): number {
+  if (a.major !== b.major) return a.major - b.major
+  if (a.minor !== b.minor) return a.minor - b.minor
+  if (a.patch !== b.patch) return a.patch - b.patch
+
+  const aPre = a.prerelease
+  const bPre = b.prerelease
+
+  if (aPre.length === 0 && bPre.length === 0) return 0
+  if (aPre.length === 0) return 1
+  if (bPre.length === 0) return -1
+
+  const length = Math.max(aPre.length, bPre.length)
+  for (let i = 0; i < length; i++) {
+    const aId = aPre[i]
+    const bId = bPre[i]
+    if (aId === undefined) return -1
+    if (bId === undefined) return 1
+    if (aId === bId) continue
+
+    const aIsNum = typeof aId === 'number'
+    const bIsNum = typeof bId === 'number'
+
+    if (aIsNum && bIsNum) return (aId as number) - (bId as number)
+    if (aIsNum) return -1
+    if (bIsNum) return 1
+    return String(aId).localeCompare(String(bId))
+  }
+  return 0
+}
+
 interface PackageJson {
   name: string
   version: string
@@ -22,7 +118,7 @@ interface PackageJson {
 
 interface TarballMetadata {
   file: string
-  packageVersion: string
+  version: SemVer
   timestamp: number
 }
 
@@ -33,10 +129,15 @@ if (!existsSync(cacheDirectory)) {
   mkdirSync(cacheDirectory, { recursive: true })
 }
 
-/**
- * Converts a package name to a safe string.
- * For example, a scoped package "@scope/package" becomes "scope-package".
- */
+function log(msg: string) {
+  console.log(`${color.cyan}[packlink]${color.reset} ${msg}`)
+}
+
+function logError(msg: string, error?: unknown) {
+  console.error(`${color.red}[packlink] error:${color.reset} ${msg}`)
+  if (error) console.error(error)
+}
+
 function getSafePackageName(packageName: string): string {
   if (packageName.startsWith('@')) {
     return packageName.slice(1).replace(/\//g, '-')
@@ -44,24 +145,6 @@ function getSafePackageName(packageName: string): string {
   return packageName
 }
 
-/**
- * Compare two semantic version strings.
- * Returns a negative number if a < b, zero if a == b, or a positive number if a > b.
- */
-function compareSemanticVersions(a: string, b: string): number {
-  const partsA = a.split('.').map(Number)
-  const partsB = b.split('.').map(Number)
-  for (let index = 0; index < Math.max(partsA.length, partsB.length); index++) {
-    const numA = partsA[index] || 0
-    const numB = partsB[index] || 0
-    if (numA !== numB) {
-      return numA - numB
-    }
-  }
-  return 0
-}
-
-/** Create a tarball of the current package and store it in the cache directory. */
 function publish(includeAddMessage: boolean = true): void {
   let packageJson: PackageJson
 
@@ -70,7 +153,7 @@ function publish(includeAddMessage: boolean = true): void {
       readFileSync(resolve(process.cwd(), 'package.json'), 'utf8')
     )
   } catch (error) {
-    console.error('Error reading package.json:', error)
+    logError('Error reading package.json', error)
     process.exit(1)
   }
 
@@ -78,16 +161,18 @@ function publish(includeAddMessage: boolean = true): void {
   const packageVersion = packageJson.version
 
   if (!packageName || !packageVersion) {
-    console.error("package.json must have both a 'name' and a 'version'")
+    logError("package.json must have both a 'name' and a 'version'")
     process.exit(1)
   }
 
   const safePackageName = getSafePackageName(packageName)
 
   try {
-    execSync(`pnpm pack --pack-destination ${cacheDirectory}`)
+    execSync(`pnpm pack --pack-destination "${cacheDirectory}"`, {
+      stdio: 'pipe',
+    })
   } catch (error) {
-    console.error('Error running "pnpm pack":', error)
+    logError('Error running "pnpm pack"', error)
     process.exit(1)
   }
 
@@ -95,11 +180,11 @@ function publish(includeAddMessage: boolean = true): void {
   const originalTarballPath = resolve(cacheDirectory, originalTarballName)
 
   if (!existsSync(originalTarballPath)) {
-    console.error('Tarball not found at destination:', originalTarballName)
+    logError(`Tarball not found at destination: ${originalTarballName}`)
     process.exit(1)
   }
 
-  // Remove any existing tarballs with the same name and version.
+  // Remove existing tarballs for this specific version to keep cache clean
   const existingTarballs = readdirSync(cacheDirectory).filter((file) =>
     file.startsWith(`${safePackageName}-${packageVersion}-`)
   )
@@ -107,53 +192,46 @@ function publish(includeAddMessage: boolean = true): void {
     rmSync(resolve(cacheDirectory, file))
   }
 
-  // Append a timestamp so that pnpm will install the updated version.
   const timestamp = Date.now()
   const newTarballName = `${safePackageName}-${packageVersion}-${timestamp}.tgz`
   const newTarballPath = resolve(cacheDirectory, newTarballName)
 
   renameSync(originalTarballPath, newTarballPath)
 
-  console.log(`Published ${packageName}@${packageVersion}`)
+  log(
+    `Published ${color.green}${packageName}@${packageVersion}${color.reset} ${color.dim}(${timestamp})${color.reset}`
+  )
 
   if (includeAddMessage) {
     console.log(
-      `You can now run 'packlink add ${packageName}' in another project to add this package as a dependency.`
+      `${color.dim}Run 'packlink add ${packageName}' in another project to use this build.${color.reset}`
     )
   }
 }
 
-/** Watches the specified build directory for changes. */
 function watchPublish(buildDirectory: string): void {
   const directoryToWatch = resolve(process.cwd(), buildDirectory)
   publish()
-  console.log(`Watching "${buildDirectory}" directory for changes...`)
+  log(`Watching "${buildDirectory}" for changes...`)
 
   let debounceTimeout: NodeJS.Timeout
   try {
     watch(directoryToWatch, { recursive: true }, () => {
-      // Debounce to prevent multiple rapid executions
-      if (debounceTimeout) {
-        clearTimeout(debounceTimeout)
-      }
+      if (debounceTimeout) clearTimeout(debounceTimeout)
       debounceTimeout = setTimeout(() => {
-        console.log(`Change detected, republishing...`)
+        log(`${color.yellow}Change detected, republishing...${color.reset}`)
         publish(false)
       }, 200)
     })
   } catch (error) {
-    console.error(`Error watching directory ${directoryToWatch}:`, error)
+    logError(`Error watching directory ${directoryToWatch}`, error)
     process.exit(1)
   }
 }
 
-/**
- * Add a published package as a dependency in the current project.
- * Searches the cache directory for tarballs matching the package name.
- */
 function add(packageName: string): void {
   if (!packageName) {
-    console.error('Usage: packlink add <package-name>')
+    logError('Usage: packlink add <package-name>')
     process.exit(1)
   }
 
@@ -163,92 +241,90 @@ function add(packageName: string): void {
   )
 
   if (files.length === 0) {
-    console.error(`No published tarball found for package ${packageName}.`)
+    logError(`No published tarball found for package ${packageName}.`)
     process.exit(1)
   }
 
   const tarballs = files
     .map((file) => {
-      const inner = file.substring(safePackageName.length + 1, file.length - 4) // yields "<packageVersion>-<timestamp>"
+      // Format: <safeName>-<version>-<timestamp>.tgz
+      // We strip the extension first
+      const nameWithoutExt = file.slice(0, -4)
+      const inner = nameWithoutExt.slice(safePackageName.length + 1)
       const lastHyphenIndex = inner.lastIndexOf('-')
 
-      if (lastHyphenIndex === -1) {
-        // If there is no hyphen, the file does not have a timestamp; skip it.
-        return null
-      }
+      if (lastHyphenIndex === -1) return null
+
+      const versionString = inner.substring(0, lastHyphenIndex)
+      const timestampString = inner.substring(lastHyphenIndex + 1)
+      const version = parseSemVer(versionString)
+
+      if (!version) return null
 
       return {
         file,
-        packageVersion: inner.substring(0, lastHyphenIndex),
-        timestamp: parseInt(inner.substring(lastHyphenIndex + 1), 10),
+        version,
+        timestamp: parseInt(timestampString, 10),
       }
     })
-    .filter(Boolean) as TarballMetadata[]
+    .filter((tarball): tarball is TarballMetadata => tarball !== null)
 
   if (tarballs.length === 0) {
-    console.error(
-      `No published tarball with timestamp found for package ${packageName}.`
-    )
+    logError(`No valid tarballs found for package ${packageName}.`)
     process.exit(1)
   }
 
+  // Sort by SemVer first, then Timestamp
   tarballs.sort((a, b) => {
-    return compareSemanticVersions(a.packageVersion, b.packageVersion)
+    const verDiff = compareSemVer(a.version, b.version)
+    if (verDiff !== 0) return verDiff
+    return a.timestamp - b.timestamp
   })
 
   const latest = tarballs[tarballs.length - 1]
   const tarballPath = resolve(cacheDirectory, latest.file)
 
   if (!existsSync(tarballPath)) {
-    console.error(`Tarball not found at ${tarballPath}`)
+    logError(`Tarball missing at ${tarballPath}`)
     process.exit(1)
   }
 
-  let dependencyPath: string
-  if (process.platform === 'win32') {
-    dependencyPath = `file:${relative(process.cwd(), tarballPath)}`
-  } else {
-    dependencyPath = `file:~${tarballPath.slice(homeDirectory.length)}`
-  }
+  // Use relative path for all platforms to ensure consistent behavior
+  const dependencyPath = `file:${relative(process.cwd(), tarballPath)}`
 
   const consumerPackagePath = resolve(process.cwd(), 'package.json')
   let consumerPackageJson: PackageJson
   try {
     consumerPackageJson = JSON.parse(readFileSync(consumerPackagePath, 'utf8'))
   } catch (error) {
-    console.error('Error reading consumer package.json:', error)
+    logError('Error reading consumer package.json', error)
     process.exit(1)
   }
 
-  // Remove old version of the package from dependencies otherwise pnpm will error since we delete old versions when publishing
   const hasDependency = consumerPackageJson.dependencies?.[packageName]
-  if (hasDependency) {
-    delete consumerPackageJson.dependencies![packageName]
-    writeFileSync(
-      consumerPackagePath,
-      JSON.stringify(consumerPackageJson, null, 2)
-    )
-  }
+  const action = hasDependency ? 'Updated' : 'Added'
 
   try {
-    console.log(`Adding dependency...`)
-    execSync(`pnpm add ${dependencyPath}`)
+    // Adding the specific file path forces pnpm to resolve to the new tarball.
+    execSync(`pnpm add "${dependencyPath}"`, { stdio: 'pipe' })
+
+    // Check if it's the exact version requested
+    const versionStr = `${latest.version.major}.${latest.version.minor}.${latest.version.patch}`
+    log(
+      `${action} ${color.green}${packageName}@${versionStr}${color.reset} ${color.dim}(${latest.timestamp})${color.reset}`
+    )
   } catch (error) {
-    console.error(`Error running "pnpm add ${dependencyPath}":`, error)
+    logError(`Error running "pnpm add ${dependencyPath}"`, error)
     process.exit(1)
   }
-
-  const action = hasDependency ? 'Updated' : 'Added'
-  console.log(
-    `${action} ${packageName}@${latest.packageVersion} dependency in package.json`
-  )
 }
 
-/** Watches the cache directory for changes to the tarball of the specified package. */
 function watchAdd(packageName: string): void {
   const safePackageName = getSafePackageName(packageName)
   add(packageName)
-  console.log(`Watching for changes...`)
+  log(
+    `Watching cache for updates to ${color.green}${packageName}${color.reset}...`
+  )
 
   let debounceTimeout: NodeJS.Timeout
   try {
@@ -258,16 +334,17 @@ function watchAdd(packageName: string): void {
         filename.startsWith(`${safePackageName}-`) &&
         filename.endsWith('.tgz')
       ) {
-        if (debounceTimeout) {
-          clearTimeout(debounceTimeout)
-        }
+        if (debounceTimeout) clearTimeout(debounceTimeout)
         debounceTimeout = setTimeout(() => {
+          log(
+            `${color.yellow}New tarball detected, updating dependency...${color.reset}`
+          )
           add(packageName)
         }, 200)
       }
     })
   } catch (error) {
-    console.error(`Error watching cache directory:`, error)
+    logError(`Error watching cache directory`, error)
     process.exit(1)
   }
 }
@@ -292,7 +369,7 @@ switch (command) {
   case 'add': {
     const packageName = args[1]
     if (!packageName) {
-      console.error('Usage: packlink add <package-name>')
+      logError('Usage: packlink add <package-name>')
       process.exit(1)
     }
     const watchArg = args.find((arg) => arg.startsWith('--watch'))
@@ -304,18 +381,22 @@ switch (command) {
     break
   }
   default:
-    console.log('Usage:')
     console.log(
-      '  packlink publish                      # Create and cache a tarball of the current package'
+      `${color.cyan}packlink${color.reset} - Local package publishing tool`
+    )
+    console.log('')
+    console.log(
+      `  ${color.green}publish${color.reset}                      Create and cache a tarball`
     )
     console.log(
-      '  packlink publish --watch              # Watch the "dist" directory for changes (or override with --watch=<directory>)'
+      `  ${color.green}publish --watch${color.reset}              Watch "dist" and republish on change`
     )
     console.log(
-      '  packlink add <package-name>           # Add the local tarball as a dependency in package.json'
+      `  ${color.green}add <pkg>${color.reset}                    Add local tarball as dependency`
     )
     console.log(
-      '  packlink add <package-name> --watch   # Watch the cache for changes to the package tarball and update the dependency'
+      `  ${color.green}add <pkg> --watch${color.reset}            Watch cache and update dependency`
     )
+    console.log('')
     process.exit(0)
 }
